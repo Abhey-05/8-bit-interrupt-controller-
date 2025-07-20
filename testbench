@@ -1,0 +1,99 @@
+module InterruptController_TB;
+// Parameters
+parameter CLK_PERIOD = 10; // Clock period in ns
+// Signals
+reg clock;
+reg reset;
+reg [7:0] intr_rq;
+reg acknowledgement;
+wire interrupt_out;
+wire enable;
+wire [7:0] data_bus_wire;
+reg [7:0] data_bus_reg; // Reg type to drive data_bus_wire
+InterruptController DUT (
+.clock(clock),
+.reset(reset),
+.intr_rq(intr_rq),
+.data_bus(data_bus_wire),
+.acknowledgement(acknowledgement),
+.interrupt_out(interrupt_out),
+.enable(enable)
+.mask(mask)
+);
+// Assign data_bus_wire to data_bus_reg
+always @* begin
+if (enable)
+data_bus_reg = data_bus_wire;
+end
+// Clock generation
+always #((CLK_PERIOD)/2) clock = ~clock;
+// Reset generation
+initial begin
+clock = 0;
+reset = 1;
+intr_rq = 8'b0;
+acknowledgement = 0;
+#50 reset = 0;
+end
+// Test scenario for polling mode
+initial begin
+#100;
+// Set command mode for polling
+data_bus_reg = {1'b0, 2'b01, 5'b0}; // Command mode for polling
+#10;
+// Trigger interrupt request
+intr_rq = 8'b00000001; // Triggering interrupt on line 0
+#20;
+// Simulate acknowledgement
+acknowledgement = 1;
+#10;
+acknowledgement = 0;
+#10;
+// Simulate ISR done
+data_bus_reg = 8'b10100000; // ISR done for line 0
+#20;
+// Trigger another interrupt request
+intr_rq = 8'b00000010; // Triggering interrupt on line 1
+#20;
+// Simulate acknowledgement
+acknowledgement = 1;
+#10;
+acknowledgement = 0;
+#10;
+// Simulate ISR done
+data_bus_reg = 8'b10100001; // ISR done for line 1
+#20;
+// End simulation
+$stop;
+end
+// Test scenario for priority mode
+initial begin
+#500;
+// Set command mode for priority
+data_bus_reg = {1'b0, 2'b10, 5'b0}; // Command mode for priority
+#10;
+// Trigger interrupts on different lines
+intr_rq = 8'b00000100; // Triggering interrupt on line 2
+#10;
+intr_rq = 8'b00001000; // Triggering interrupt on line 3
+#10;
+intr_rq = 8'b00010000; // Triggering interrupt on line 4
+#10;
+intr_rq = 8'b00100000; // Triggering interrupt on line 5
+#10;
+intr_rq = 8'b01000000; // Triggering interrupt on line 6
+#10;
+intr_rq = 8'b10000000; // Triggering interrupt on line 7
+#50;
+// Simulate acknowledgement
+acknowledgement = 1;
+#10;
+acknowledgement = 0;
+#10;
+// Simulate ISR done
+data_bus_reg = 8'b01100000; // ISR done for line 3
+#50;
+// End simulation
+$stop;
+end
+endmodule

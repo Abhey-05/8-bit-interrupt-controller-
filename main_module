@@ -1,0 +1,307 @@
+//main module
+module InterruptController (
+input wire clock, // Clock
+input wire reset, // Reset
+input mask //mask input
+input wire [7:0] intr_rq_1, // Interrupt request
+inout wire [7:0] data_bus, // Bidirectional data bus for communication
+between processor and hardware
+input wire acknowledgement, // Acknowledgement from the processor
+output wire interrupt_out, // Interrupt to processor
+output wire enable // Bus output enable
+);
+
+// States definition
+parameter S_Reset = 4'b0000,
+S_GetCommands = 4'b0001,
+S_JumpIntMethod = 4'b0010,
+S_StartPolling = 4'b0011,
+S_TxIntInfoPolling = 4'b0100,
+S_AckTxInfoRxPolling = 4'b0101,
+S_AckISRDonePolling = 4'b0110,
+S_StartPriority = 4'b0111,
+S_TxIntInfoPriority = 4'b1000,
+S_AckTxInfoRxPriority = 4'b1001,
+S_AckISRDonePriority = 4'b1010,
+S_Reserved1 = 4'b1011,
+S_Reserved2 = 4'b1100,
+S_Reserved3 = 4'b1101,
+S_Reserved4 = 4'b1110,
+S_Reserved5 = 4'b1111;
+
+// Internal registers
+reg [3:0] state, next_state;
+reg [1:0] cmd_mode, next_cmd_mode;
+reg [1:0] cmd_cycle, next_cmd_cycle;
+reg [2:0] intr_index, next_intr_index;
+reg [2:0] intr_ptr, next_intr_ptr;
+reg [2:0] prior_table_next [0:7];
+reg [2:0] prior_table [0:7];
+reg oe, next_oe;
+reg [7:0] intr_bus, next_intr_bus;
+reg intr_out, next_intr_out;
+wire clk;
+myclk m1(clock,clk);
+// Counter for loop
+integer i;
+wire intr_rq;
+interrupt_masking(clk,mask,intr_rq_1,intr_rq);
+
+// Combinational logic for state transition
+always @(posedge clk or posedge reset) begin
+if (reset) begin
+// Initialize registers on reset
+state <= S_Reset;
+cmd_mode <= 2'b00;
+cmd_cycle <= 2'b00;
+oe <= 1'b0;
+intr_bus <= 8'bzzzzzzzz;
+intr_out <= 1'b0;
+intr_index <= 3'b000;
+intr_ptr <= 3'b000;
+for (i = 0; i < 8; i = i + 1) begin
+prior_table[i] <= 3'b000;
+end
+end else begin
+// Update registers based on next values
+state <= next_state;
+cmd_mode <= next_cmd_mode;
+cmd_cycle <= next_cmd_cycle;
+oe <= next_oe;
+intr_bus <= next_intr_bus;
+intr_out <= next_intr_out;
+intr_index <= next_intr_index;
+intr_ptr <= next_intr_ptr;
+for (i = 0; i < 8; i = i + 1) begin
+prior_table[i] <= prior_table_next[i];
+end
+end
+end
+// Combinational logic for next state calculation
+always @* begin
+next_state = state;
+next_cmd_mode = cmd_mode;
+next_cmd_cycle = cmd_cycle;
+next_oe = oe;
+next_intr_out = intr_out;
+next_intr_bus = intr_bus;
+next_intr_index = intr_index;
+next_intr_ptr = intr_ptr;
+for (i = 0; i < 8; i = i + 1) begin
+prior_table_next[i] = prior_table[i];
+end
+case (state)
+// Reset state
+S_Reset: begin
+cmd_mode <= 2'b00;
+cmd_cycle <= 2'b00;
+intr_index <= 3'b000;
+intr_ptr <= 3'b000;
+for (i = 0; i < 8; i = i + 1) begin
+prior_table_next[i] = 3'b000;
+end
+oe <= 1'b0;
+next_state = S_GetCommands;
+end
+
+// Wait for commands
+S_GetCommands: begin
+oe <= 1'b0;
+case (data_bus[1:0])
+2'b01: begin // Polling mode
+cmd_mode <= 2'b01;
+next_state = S_JumpIntMethod;
+end
+2'b10: begin // Priority mode
+case (cmd_cycle)
+2'b00: begin
+prior_table_next[0] <= data_bus[7:5];
+prior_table_next[1] <= data_bus[4:2];
+next_state <= S_GetCommands;
+next_cmd_cycle <= cmd_cycle + 1'b1;
+end
+2'b01: begin
+prior_table_next[2] <= data_bus[7:5];
+prior_table_next[3] <= data_bus[4:2];
+next_state <= S_GetCommands;
+next_cmd_cycle <= cmd_cycle + 1'b1;
+end
+2'b10: begin
+prior_table_next[4] <= data_bus[7:5];
+prior_table_next[5] <= data_bus[4:2];
+next_state <= S_GetCommands;
+next_cmd_cycle <= cmd_cycle + 1'b1;
+end
+2'b11: begin
+prior_table_next[6] <= data_bus[7:5];
+prior_table_next[7] <= data_bus[4:2];
+next_state <= S_JumpIntMethod;
+next_cmd_cycle <= cmd_cycle + 1'b1;
+next_cmd_mode <= 2'b10;
+end
+default: begin
+next_state <= S_GetCommands;
+next_cmd_cycle <= 2'b00;
+next_cmd_mode <= 2'b00;
+end
+endcase
+end
+default: begin
+next_state <= S_GetCommands;
+end
+endcase
+end
+
+// Jump to interrupt method based on command mode
+S_JumpIntMethod: begin
+intr_index <= 3'b000;
+intr_ptr <= 3'b000;
+case (cmd_mode)
+2'b01: next_state = S_StartPolling;
+2'b10: next_state = S_StartPriority;
+default: next_state = S_Reset;
+endcase
+oe <= 1'b0;
+end
+// Start Polling
+S_StartPolling: begin
+if (intr_rq[intr_index]) begin
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPolling;
+end else begin
+intr_out <= 1'b0;
+next_intr_index <= intr_index + 1;
+end
+oe <= 1'b0;
+end
+// Transmit Interrupt Info in Polling Mode
+S_TxIntInfoPolling: begin
+if (~acknowledgement) begin
+intr_out <= 1'b0;
+intr_bus <= {5'b01011, intr_index};
+oe <= 1'b1;
+next_state = S_AckTxInfoRxPolling;
+end else begin
+next_state = S_TxIntInfoPolling;
+end
+end
+// Acknowledge Tx Info Rx in Polling Mode
+S_AckTxInfoRxPolling: begin
+if (~acknowledgement) begin
+oe <= 1'b0;
+next_state = S_AckISRDonePolling;
+end
+end
+// Acknowledge ISR Done in Polling Mode
+S_AckISRDonePolling: begin
+if (~acknowledgement && (data_bus[7:3] == 5'b10100) &&
+(data_bus[2:0] == intr_index)) begin
+next_state = S_StartPolling;
+end else if (~acknowledgement && ((data_bus[7:3] != 5'b10100)
+|| (data_bus[2:0] != intr_index))) begin
+next_state = S_Reset;
+end else begin
+next_state = S_AckISRDonePolling;
+end
+
+end
+// Start Priority
+S_StartPriority: begin
+if (intr_rq[prior_table[0]]) begin
+intr_ptr <= prior_table[0];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[1]]) begin
+intr_ptr <= prior_table[1];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[2]]) begin
+intr_ptr <= prior_table[2];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[3]]) begin
+intr_ptr <= prior_table[3];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[4]]) begin
+intr_ptr <= prior_table[4];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[5]]) begin
+intr_ptr <= prior_table[5];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[6]]) begin
+intr_ptr <= prior_table[6];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else if (intr_rq[prior_table[7]]) begin
+intr_ptr <= prior_table[7];
+intr_out <= 1'b1;
+next_state = S_TxIntInfoPriority;
+end else begin
+next_state = S_StartPriority;
+end
+oe <= 1'b0;
+end
+// Transmit Interrupt Info in Priority Mode
+S_TxIntInfoPriority: begin
+if (~acknowledgement) begin
+intr_out <= 1'b0;
+intr_bus <= {5'b10011, intr_ptr};
+oe <= 1'b1;
+next_state = S_AckTxInfoRxPriority;
+end else begin
+next_state = S_TxIntInfoPriority;
+end
+end
+// Acknowledge Tx Info Rx in Priority Mode
+S_AckTxInfoRxPriority: begin
+if (~acknowledgement) begin
+oe <= 1'b0;
+next_state = S_AckISRDonePriority;
+end
+end
+// Acknowledge ISR Done in Priority Mode
+S_AckISRDonePriority: begin
+if (~acknowledgement && (data_bus[7:3] == 5'b01100) &&
+(data_bus[2:0] == intr_ptr)) begin
+next_state = S_StartPriority;
+end else if (~acknowledgement && ((data_bus[7:3] != 5'b01100) ||
+(data_bus[2:0] != intr_ptr))) begin
+next_state = S_Reset;
+end else begin
+next_state = S_AckISRDonePriority;
+end
+end
+// Invalid states go to reset
+default: begin
+next_state = S_Reset;
+oe <= 1'b0;
+end
+endcase
+end
+// Assign outputs
+assign interrupt_out = intr_out;
+assign data_bus = (oe) ? intr_bus : 8'bzzzzzzzz;
+assign enable = oe;
+endmodule
+//masking module
+module interrupt_masking (
+input clk,
+input enable, // Enable input
+input [7:0] interrupt, // 8-bit interrupt input
+output [7:0] masked_interrupt // Masked interrupt output
+);
+// Register to store interrupt mask
+reg [7:0] interrupt_mask;
+always @(posedge clk) begin
+if (~enable) begin
+interrupt_mask <= 8'b11111111; // Initialize mask to all 1's
+end else begin
+interrupt_mask <= 8'b00000000; // Apply masking
+end
+end
+// Assign masked interrupt output
+assign masked_interrupt = interrupt & interrupt_mask;
+endmodule
